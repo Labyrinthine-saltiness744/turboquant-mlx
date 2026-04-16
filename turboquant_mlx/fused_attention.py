@@ -95,39 +95,32 @@ def turboquant_attention(
 
         weights = mx.softmax(scores, axis=-1)
 
-        # --- V: sparse path, reuse of pre-dequanted buffer, or full dequant ---
+        # --- V: either reuse pre-dequanted buffer, or go through the
+        # butterfly-pulled-out sparse_v_matvec (threshold=0 is the dense
+        # case, threshold>0 skips small weights). The old per-position
+        # prerot_packed_dequantize + matmul path is strictly dominated
+        # by sparse_v_matvec(threshold=0) in speed now that the butterfly
+        # is taken out of the position loop.
         v_dim = cache._v_dim
         if v_buffer is not None:
             v_deq = v_buffer[b]  # (n_kv_heads, total, v_dim)
             if n_rep > 1:
                 v_deq = mx.repeat(v_deq, n_rep, axis=0)
             out = weights[:, None, :] @ v_deq.astype(queries.dtype)
-        elif sparse_v_threshold is not None and sparse_v_threshold >= 0.0:
-            # GQA-aware: sparse kernel reads V at kv_head = q_head / n_rep.
+        else:
+            thr = sparse_v_threshold if (
+                sparse_v_threshold is not None and sparse_v_threshold >= 0.0
+            ) else 0.0
             vp = cache.v_packed[b, :, :total, :]
             vn = cache.v_norms[b, :, :total]
-            sparse = sparse_v_matvec(
+            matvec = sparse_v_matvec(
                 weights, vp, vn,
                 cache._v_q.centroids, cache._v_q.signs,
                 v_dim, cache.quant_bits,
-                threshold=sparse_v_threshold,
+                threshold=thr,
                 n_rep=n_rep,
             )  # (n_q_heads, v_dim)
-            out = sparse[:, None, :].astype(queries.dtype)
-        else:
-            vp = cache.v_packed[b, :, :total, :]
-            vn = cache.v_norms[b, :, :total]
-            vp_flat = vp.reshape(-1, vp.shape[-1])
-            vn_flat = vn.reshape(-1)
-            v_deq = prerot_packed_dequantize(
-                vp_flat, vn_flat,
-                cache._v_q.centroids,
-                cache._v_q.signs,
-                v_dim, cache.quant_bits,
-            ).reshape(n_kv_heads, total, v_dim)
-            if n_rep > 1:
-                v_deq = mx.repeat(v_deq, n_rep, axis=0)
-            out = weights[:, None, :] @ v_deq.astype(queries.dtype)
+            out = matvec[:, None, :].astype(queries.dtype)
 
         outputs.append(out)
 

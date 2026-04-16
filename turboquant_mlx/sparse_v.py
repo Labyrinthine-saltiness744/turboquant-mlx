@@ -30,18 +30,15 @@ import math
 import mlx.core as mx
 
 SPARSE_V_KERNEL = """
-    // One threadgroup per Q head; `dim` threads cooperate on the butterfly.
-    // GQA: V is indexed by kv_head = q_head / n_rep, weights by q_head.
+    // Butterfly-pulled-out design: accumulate S[elem] = sum_pos w[pos] *
+    // norm[pos] * centroids[idx[pos, elem]] in Phase 1 (no barriers!),
+    // then do one threadgroup-wide butterfly on S at the end. Using
+    // WHT linearity: sum_pos w[pos] * butterfly(c_pos) = butterfly(S),
+    // so per-position butterflies (seq_len of them, each log(d) barriers)
+    // collapse into a single butterfly. On seq_len=8K that is roughly
+    // a seq_len/log(d) reduction in barrier count.
     //
-    // An earlier redesign tried one threadgroup per kv_head so the butterfly
-    // runs once per kv_head and scatters into n_rep Q heads (saves ~n_rep
-    // worth of butterfly work and DRAM traffic). On real Qwen-class GQA
-    // models that made things worse: n_kv_heads is small (4..8), so the
-    // kernel becomes under-utilized (only 4..8 threadgroups on a GPU that
-    // can host dozens), and the shared threshold check (max-of-n_rep)
-    // drops fewer positions than per-Q-head. We keep the per-Q-head
-    // design here and note GQA sharing as future work. See the blog post
-    // for the measurements that led to this decision.
+    // GQA: V is indexed by kv_head = q_head / n_rep.
     uint head = threadgroup_position_in_grid.x;   // q_head
     uint elem = thread_position_in_threadgroup.x;
     uint dim = dims[0];
@@ -53,49 +50,41 @@ SPARSE_V_KERNEL = """
     uint bit_mask = (1u << bits) - 1u;
     uint kv_head = head / n_rep;
 
-    threadgroup T shared[256];
-    T acc = (T)0;
-
-    // Position loop runs on every thread coherently — `continue` below is
-    // taken by the whole threadgroup (weight is a scalar), so the barriers
-    // inside the butterfly stay well-defined.
+    // Phase 1: per-thread accumulate S[elem] across positions — no barriers.
+    T s = (T)0;
     uint v_base = kv_head * seq_len * packed_dim;
+    uint word_idx = elem / vals_per_word;
+    uint pos_in_word = elem % vals_per_word;
+    uint shift = pos_in_word * bits;
     for (uint pos = 0; pos < seq_len; pos++) {
         T w = weights[head * seq_len + pos];
         if (w < threshold[0]) continue;
-
-        // Unpack this thread's V codebook index for this position.
-        uint word_idx = elem / vals_per_word;
-        uint pos_in_word = elem % vals_per_word;
         uint word = v_packed[v_base + pos * packed_dim + word_idx];
-        uint idx = (word >> (pos_in_word * bits)) & bit_mask;
-
-        shared[elem] = centroids[idx];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // In-place raw WHT butterfly over the `dim` codebook values held
-        // by this threadgroup (matches kernels.PACKED_DEQUANT_KERNEL).
-        uint h = 1;
-        while (h < dim) {
-            uint block = elem / (2 * h);
-            uint offset = elem % (2 * h);
-            if (offset < h) {
-                uint j = block * 2 * h + offset;
-                T a = shared[j];
-                T b = shared[j + h];
-                shared[j]     = a + b;
-                shared[j + h] = a - b;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            h *= 2;
-        }
-
-        // Weight * butterfly_elem * v_norm[kv_head, pos]. signs and
-        // 1/sqrt(d) are constants in `elem` — apply once after the loop.
-        acc += w * shared[elem] * norms[kv_head * seq_len + pos];
+        uint idx = (word >> shift) & bit_mask;
+        s += w * norms[kv_head * seq_len + pos] * centroids[idx];
     }
 
-    out[head * dim + elem] = acc * signs[elem] * scale[0];
+    // Phase 2: one threadgroup-wide butterfly on S.
+    threadgroup T shared[256];
+    shared[elem] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint h = 1;
+    while (h < dim) {
+        uint block = elem / (2 * h);
+        uint offset = elem % (2 * h);
+        if (offset < h) {
+            uint j = block * 2 * h + offset;
+            T a = shared[j];
+            T b = shared[j + h];
+            shared[j]     = a + b;
+            shared[j + h] = a - b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        h *= 2;
+    }
+
+    out[head * dim + elem] = shared[elem] * signs[elem] * scale[0];
 """
 
 
