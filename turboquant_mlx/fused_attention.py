@@ -60,12 +60,12 @@ def turboquant_attention(
         q = queries[b, :, 0, :]  # (n_q_heads, dim)
 
         # Pre-rotate query: WHT(signs * Q) — one WHT per head, not per K position
-        q_rot = prerotate_query(q, cache._k_quantizer.signs)
+        q_rot = prerotate_query(q, cache._k_q.signs)
 
         # Fused scores: just codebook lookups + dot — no WHT in inner loop
         scores = prerot_fused_qk_scores(
             q_rot, kp, kn,
-            cache._k_quantizer.centroids,
+            cache._k_q.centroids,
             dim, cache.quant_bits,
         )
 
@@ -100,8 +100,8 @@ def turboquant_attention(
             vn_flat = vn.reshape(-1)
             v_deq = prerot_packed_dequantize(
                 vp_flat, vn_flat,
-                cache._v_quantizer.centroids,
-                cache._v_quantizer.signs,
+                cache._v_q.centroids,
+                cache._v_q.signs,
                 v_dim, cache.quant_bits,
             ).reshape(n_kv_heads, total, v_dim)
             if n_rep > 1:
