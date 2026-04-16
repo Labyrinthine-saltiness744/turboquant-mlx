@@ -57,10 +57,13 @@ class TurboQuantKVCache:
 
     step = 256
 
-    def __init__(self, bits: int = 3, seed: int = 42):
+    def __init__(self, bits: int = 3, seed: int = 42, fused: bool = False):
         self.quant_bits = bits
         self.seed = seed
         self.offset = 0
+        # Opt-in flag read by the fused SDPA monkey-patch (turboquant_mlx.patch);
+        # decoupled from cache data, so it is not persisted in state/meta_state.
+        self.fused = fused
 
         self.k_packed = None
         self.k_norms = None
@@ -257,6 +260,9 @@ class TurboQuantKVCache:
         obj._k_pdim = None
         obj._v_pdim = None
         obj._dtype = None
+        # fused is a runtime flag, not persisted in state/meta_state;
+        # callers that need the fused path must re-enable it after load.
+        obj.fused = False
         obj.meta_state = meta_state
         obj.state = state
         return obj
