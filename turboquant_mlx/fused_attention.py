@@ -57,16 +57,16 @@ def turboquant_attention(
     outputs = []
     for b in range(B):
         # --- K attention scores via pre-rotated query ---
+        # GQA-aware: do NOT mx.repeat K — kernel broadcasts kv_head from
+        # q_head via n_rep. Saves allocation proportional to n_rep *
+        # seq_len * packed_dim per decode step, which is the dominant
+        # memory cost on GQA models (Qwen 2.5 7B: n_rep=7, so 7x).
         kp = cache.k_packed[b, :, :total, :]
         kn = cache.k_norms[b, :, :total]
 
-        if n_rep > 1:
-            kp = mx.repeat(kp, n_rep, axis=0)
-            kn = mx.repeat(kn, n_rep, axis=0)
-
         q = queries[b, :, 0, :]  # (n_q_heads, dim)
 
-        # Pre-rotate query: WHT(signs * Q) — one WHT per head, not per K position
+        # Pre-rotate query: WHT(signs * Q) — one WHT per Q head, not per K position
         q_rot = prerotate_query(q, cache._k_q.signs)
 
         # Fused scores: just codebook lookups + dot — no WHT in inner loop
@@ -74,6 +74,7 @@ def turboquant_attention(
             q_rot, kp, kn,
             cache._k_q.centroids,
             dim, cache.quant_bits,
+            n_rep=n_rep,
         )
 
         scores = scores * attn_scale
@@ -102,16 +103,15 @@ def turboquant_attention(
                 v_deq = mx.repeat(v_deq, n_rep, axis=0)
             out = weights[:, None, :] @ v_deq.astype(queries.dtype)
         elif sparse_v_threshold is not None and sparse_v_threshold >= 0.0:
+            # GQA-aware: sparse kernel reads V at kv_head = q_head / n_rep.
             vp = cache.v_packed[b, :, :total, :]
             vn = cache.v_norms[b, :, :total]
-            if n_rep > 1:
-                vp = mx.repeat(vp, n_rep, axis=0)
-                vn = mx.repeat(vn, n_rep, axis=0)
             sparse = sparse_v_matvec(
                 weights, vp, vn,
                 cache._v_q.centroids, cache._v_q.signs,
                 v_dim, cache.quant_bits,
                 threshold=sparse_v_threshold,
+                n_rep=n_rep,
             )  # (n_q_heads, v_dim)
             out = sparse[:, None, :].astype(queries.dtype)
         else:

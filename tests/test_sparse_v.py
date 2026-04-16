@@ -109,6 +109,44 @@ def test_threshold_bounded_error():
     assert cos > 0.999, f"sparse V with threshold={threshold}: cosine={cos}"
 
 
+@pytest.mark.parametrize(
+    "n_kv_heads,n_rep",
+    [(4, 2), (2, 4), (4, 7)],
+)
+def test_gqa_matches_mx_repeat_reference(n_kv_heads, n_rep):
+    """GQA: kernel broadcasting kv_head = q_head / n_rep == mx.repeat reference."""
+    seq_len, dim, bits = 128, 128, 3
+    n_q_heads = n_kv_heads * n_rep
+    mx.random.seed(0)
+    pq = PolarQuantizer(dim=dim, bits=bits)
+    raw = mx.random.randint(0, 2**bits, shape=(n_kv_heads, seq_len, dim))
+    v_packed = pack_indices(raw.reshape(-1, dim), bits).reshape(
+        n_kv_heads, seq_len, -1
+    )
+    v_norms = mx.random.uniform(shape=(n_kv_heads, seq_len)) + 0.1
+    weights = _softmax_weights(n_q_heads, seq_len, seed=1)
+
+    # GQA-aware path: kernel reads KV at q_head / n_rep.
+    gqa = sparse_v_matvec(
+        weights, v_packed, v_norms, pq.centroids, pq.signs, dim, bits,
+        threshold=0.0, n_rep=n_rep,
+    )
+
+    # Reference: expand KV to q_heads via mx.repeat, run single-head path.
+    vp_rep = mx.repeat(v_packed, n_rep, axis=0)
+    vn_rep = mx.repeat(v_norms, n_rep, axis=0)
+    ref = sparse_v_matvec(
+        weights, vp_rep, vn_rep, pq.centroids, pq.signs, dim, bits,
+        threshold=0.0, n_rep=1,
+    )
+    mx.eval(gqa, ref)
+    max_abs = float(np.abs(np.array(gqa) - np.array(ref)).max())
+    assert max_abs < 1e-4, (
+        f"GQA kernel (n_kv_heads={n_kv_heads}, n_rep={n_rep}) diverges "
+        f"from mx.repeat reference: max_abs={max_abs}"
+    )
+
+
 def test_threshold_above_all_weights_returns_zero():
     n_heads, seq_len, dim, bits = 2, 64, 128, 3
     mx.random.seed(2)

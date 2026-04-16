@@ -97,6 +97,42 @@ def test_prerot_scores_match_full_kernel(n_heads, seq_len, dim, bits):
     )
 
 
+@pytest.mark.parametrize(
+    "n_kv_heads,n_rep",
+    [(4, 2), (2, 4), (4, 7)],
+)
+def test_prerot_qk_gqa_matches_mx_repeat_reference(n_kv_heads, n_rep):
+    """GQA: kv_head = q_head / n_rep in kernel == mx.repeat reference."""
+    seq_len, dim, bits = 128, 128, 3
+    n_q_heads = n_kv_heads * n_rep
+    mx.random.seed(0)
+    pq = PolarQuantizer(dim=dim, bits=bits)
+
+    raw = mx.random.randint(0, 2**bits, shape=(n_kv_heads, seq_len, dim))
+    k_packed = pack_indices(raw.reshape(-1, dim), bits).reshape(
+        n_kv_heads, seq_len, -1
+    )
+    k_norms = mx.random.uniform(shape=(n_kv_heads, seq_len)) * 10.0 + 1.0
+    query = mx.random.normal(shape=(n_q_heads, dim))
+    q_rot = prerotate_query(query, pq.signs)
+
+    # GQA path (kernel broadcasts)
+    gqa = prerot_fused_qk_scores(
+        q_rot, k_packed, k_norms, pq.centroids, dim, bits, n_rep=n_rep
+    )
+    # Reference: expand KV to q_heads via mx.repeat, use n_rep=1.
+    kp_rep = mx.repeat(k_packed, n_rep, axis=0)
+    kn_rep = mx.repeat(k_norms, n_rep, axis=0)
+    ref = prerot_fused_qk_scores(
+        q_rot, kp_rep, kn_rep, pq.centroids, dim, bits, n_rep=1
+    )
+    mx.eval(gqa, ref)
+    max_abs = float(np.abs(np.array(gqa) - np.array(ref)).max())
+    assert max_abs < 1e-4, (
+        f"GQA QK (n_kv={n_kv_heads}, n_rep={n_rep}) diverges: max_abs={max_abs}"
+    )
+
+
 def test_prerot_scales_as_one_over_dim():
     """Sanity: doubling the query dimension (same signs/K construction)
     should not produce wild magnitude changes in score stats, because the

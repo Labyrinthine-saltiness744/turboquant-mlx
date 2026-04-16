@@ -61,21 +61,28 @@ PREROTATE_QUERY_KERNEL = """
     q_out[head * dim + elem] = shared[elem];
 """
 
-# --- Pre-rotated Q @ K: no per-K butterfly, no per-K signs.
-# scores[head, pos] = (norms[head, pos] / sqrt(d)) * <Q_rot[head], centroids[K_idx[head, pos]]>
+# --- Pre-rotated Q @ K, GQA-aware: no per-K butterfly, no per-K signs.
+# Grid.y addresses query heads (n_q_heads). K is indexed by kv_head =
+# head / n_rep, so grouped-query attention (n_kv_heads < n_q_heads)
+# reads the same packed KV slot from multiple Q heads without any
+# mx.repeat expansion.
+# scores[q_head, pos] = (norms[kv_head, pos] / sqrt(d)) *
+#                       <Q_rot[q_head], centroids[K_idx[kv_head, pos]]>
 PREROT_FUSED_QK_KERNEL = """
     uint pos = threadgroup_position_in_grid.x;
-    uint head = threadgroup_position_in_grid.y;
+    uint head = threadgroup_position_in_grid.y;  // q_head
     uint elem = thread_position_in_threadgroup.x;
     uint dim = dims[0];
     uint seq_len = dims[1];
     uint bits = dims[2];
     uint vals_per_word = dims[3];
     uint packed_dim = dims[4];
+    uint n_rep = dims[5];
     uint bit_mask = (1u << bits) - 1u;
+    uint kv_head = head / n_rep;
 
-    // Unpack one codebook index for this (head, pos, elem).
-    uint kv_base = head * seq_len * packed_dim + pos * packed_dim;
+    // Unpack one codebook index for (kv_head, pos, elem).
+    uint kv_base = kv_head * seq_len * packed_dim + pos * packed_dim;
     uint word_idx = elem / vals_per_word;
     uint pos_in_word = elem % vals_per_word;
     uint word = packed[kv_base + word_idx];
@@ -97,7 +104,7 @@ PREROT_FUSED_QK_KERNEL = """
     }
 
     if (elem == 0) {
-        out[head * seq_len + pos] = shared[0] * norms[head * seq_len + pos] * scale[0];
+        out[head * seq_len + pos] = shared[0] * norms[kv_head * seq_len + pos] * scale[0];
     }
 """
 
@@ -146,19 +153,22 @@ def prerot_fused_qk_scores(
     centroids: mx.array,
     dim: int,
     bits: int,
+    n_rep: int = 1,
 ) -> mx.array:
     """Compute Q@K scores using a pre-rotated query.
 
     Args:
-        q_rot: (n_heads, dim) output of prerotate_query.
-        k_packed: (n_heads, seq_len, packed_dim) packed uint32 indices.
-        k_norms: (n_heads, seq_len) per-position K vector norms.
+        q_rot: (n_q_heads, dim) output of prerotate_query.
+        k_packed: (n_kv_heads, seq_len, packed_dim) packed uint32 indices.
+        k_norms: (n_kv_heads, seq_len) per-position K vector norms.
         centroids: (n_levels,) Lloyd-Max centroids (same as encoder).
         dim: head dimension (must equal k_packed shape d, power of 2).
         bits: quantization bit width (1-4).
+        n_rep: Q-heads-per-KV-head for GQA. n_rep=1 is multi-head. Each
+            Q head ``h`` reads KV at ``h // n_rep``.
 
     Returns:
-        (n_heads, seq_len) raw QK scores (attention scaling applied by caller).
+        (n_q_heads, seq_len) raw QK scores (attention scaling applied by caller).
     """
     global _prerot_fused_qk
     if _prerot_fused_qk is None:
@@ -169,7 +179,12 @@ def prerot_fused_qk_scores(
             source=PREROT_FUSED_QK_KERNEL,
         )
 
-    n_heads, seq_len = k_norms.shape
+    n_q_heads = q_rot.shape[0]
+    n_kv_heads, seq_len = k_norms.shape
+    if n_q_heads != n_kv_heads * n_rep:
+        raise ValueError(
+            f"n_q_heads ({n_q_heads}) must equal n_kv_heads ({n_kv_heads}) * n_rep ({n_rep})"
+        )
     p_dim = k_packed.shape[-1]
     vpw = {1: 32, 2: 16, 3: 10, 4: 8}[bits]
     # Match the encoder/decoder scale convention in metal.py / kernels.py: the
@@ -180,21 +195,23 @@ def prerot_fused_qk_scores(
     # the same inputs. End-to-end, the outer attention code then multiplies
     # by 1/sqrt(d) one more time (attention scaling), matching the paper.
     scale = mx.array([1.0 / dim], dtype=mx.float32)
-    dims_arr = mx.array([dim, seq_len, bits, vpw, p_dim], dtype=mx.uint32)
+    dims_arr = mx.array(
+        [dim, seq_len, bits, vpw, p_dim, n_rep], dtype=mx.uint32
+    )
 
     outputs = _prerot_fused_qk(
         inputs=[
-            q_rot.astype(mx.float32).reshape(n_heads * dim),
-            k_packed.astype(mx.uint32).reshape(n_heads * seq_len * p_dim),
-            k_norms.astype(mx.float32).reshape(n_heads * seq_len),
+            q_rot.astype(mx.float32).reshape(n_q_heads * dim),
+            k_packed.astype(mx.uint32).reshape(n_kv_heads * seq_len * p_dim),
+            k_norms.astype(mx.float32).reshape(n_kv_heads * seq_len),
             centroids,
             scale,
             dims_arr,
         ],
         template=[("T", mx.float32)],
-        grid=(seq_len * dim, n_heads, 1),
+        grid=(seq_len * dim, n_q_heads, 1),
         threadgroup=(dim, 1, 1),
-        output_shapes=[(n_heads * seq_len,)],
+        output_shapes=[(n_q_heads * seq_len,)],
         output_dtypes=[mx.float32],
     )
-    return outputs[0].reshape(n_heads, seq_len)
+    return outputs[0].reshape(n_q_heads, seq_len)
