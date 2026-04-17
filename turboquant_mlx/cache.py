@@ -272,6 +272,14 @@ class TurboQuantKVCache:
     def size(self):
         return self.offset
 
+    @property
+    def state(self):
+        """Compatibility shim for mlx-lm generate internals."""
+        if self.k_packed is None:
+            return []
+        return [self.k_packed[..., :self.offset, :], self.k_norms[..., :self.offset],
+                self.v_packed[..., :self.offset, :], self.v_norms[..., :self.offset]]
+
     def make_mask(self, N, return_array: bool = False, window_size=None):
         """Build the attention mask for a forward of length ``N`` tokens.
 
