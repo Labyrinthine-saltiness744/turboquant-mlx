@@ -38,15 +38,43 @@ class VOnlyTurboQuantCache:
     through the standard (fp16) SDPA, not the quantized path.
     """
 
-    def __init__(self, bits: int = 3, seed: int = 42):
+    def __init__(self, bits: int = 3, seed: int = 42, no_v_buffer: bool = False):
         self._k_cache = KVCache()
         self._v_tq = TurboQuantKVCache(bits=bits, seed=seed, v_only=True)
         self._v_bits = bits
+        # When True, V is re-dequanted from packed storage every step
+        # instead of held in a persistent fp16 buffer. Trades ~2x decode
+        # slowdown for lower peak memory (effective at 8K, not at 32K
+        # where MLX holds transient dequant tensors across layers).
+        self._no_v_buffer = no_v_buffer
 
     def update_and_fetch(self, keys, values):
         """Store K in fp16, compress V, return (K_fp16, V_dequant)."""
         k_out, _ = self._k_cache.update_and_fetch(keys, values)
-        _, v_out = self._v_tq.update_and_fetch(keys, values)
+        if self._no_v_buffer:
+            # Skip incremental buffer, re-dequant from packed every call.
+            B, H, S, v_dim = values.shape
+            self._v_tq._ensure_quantizer(keys.shape[-1], v_dim)
+            self._v_tq._ensure_storage(B, H, S)
+            prev = self._v_tq.offset
+            from turboquant_mlx.metal import fused_quantize
+            v_pk, v_nrm = fused_quantize(
+                values.reshape(-1, v_dim),
+                self._v_tq._v_q.signs,
+                self._v_tq._v_q.boundaries,
+                v_dim, self._v_tq.quant_bits,
+            )
+            v_pk = v_pk.reshape(B, H, S, self._v_tq._v_pdim)
+            self._v_tq.v_packed[..., prev:prev+S, :] = v_pk
+            self._v_tq.v_norms[..., prev:prev+S] = v_nrm.reshape(B, H, S)
+            self._v_tq.offset += S
+            total = self._v_tq.offset
+            v_out = self._v_tq._full_dequant(
+                self._v_tq.v_packed, self._v_tq.v_norms,
+                self._v_tq._v_q, v_dim, B, H, total, values.dtype,
+            )
+        else:
+            _, v_out = self._v_tq.update_and_fetch(keys, values)
         return k_out, v_out
 
     @property
