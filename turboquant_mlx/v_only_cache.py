@@ -82,8 +82,37 @@ class VOnlyTurboQuantCache:
         return self._k_cache.offset
 
     @property
+    def offset(self):
+        return self._k_cache.offset
+
+    @property
     def state(self):
-        return self._k_cache.state
+        """Combined K (fp16) + V (packed) state for serialization."""
+        k_state = list(self._k_cache.state) if self._k_cache.state else []
+        v_state = list(self._v_tq.state) if self._v_tq.state else []
+        return k_state + v_state
+
+    @property
+    def meta_state(self):
+        return f"VOnlyTQ,{self._v_bits},{self._v_tq.seed},{self._v_tq.meta_state}"
+
+    @classmethod
+    def from_state(cls, state, meta_state):
+        parts = meta_state.split(",", 3)
+        bits = int(parts[1])
+        seed = int(parts[2])
+        tq_meta = parts[3]
+        obj = cls(bits=bits, seed=seed)
+        # K state: first 2 arrays (keys, values from KVCache)
+        if len(state) >= 2:
+            obj._k_cache.keys = state[0]
+            obj._k_cache.values = state[1]
+            obj._k_cache.offset = state[0].shape[2]
+        # V state: remaining arrays (from TurboQuantKVCache)
+        if len(state) > 2:
+            obj._v_tq.state = state[2:]
+            obj._v_tq.meta_state = tq_meta
+        return obj
 
     def make_mask(self, *args, **kwargs):
         return self._k_cache.make_mask(*args, **kwargs)
