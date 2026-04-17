@@ -117,6 +117,7 @@ tests/
   test_sparse_v.py       Sparse V correctness + GQA (8 tests)
   test_fused_attn.py     End-to-end fused attention (6 tests)
   test_flash_attention.py Flash-attention correctness (7 tests)
+  test_v_only_cache.py   V-only cache, adaptive cache, serialization (11 tests)
 ```
 
 ## Install
@@ -136,7 +137,7 @@ pip install -e ../mlx-lm  # or wherever the fork lives
 
 ```bash
 pytest tests/ -v
-# 40 tests, all passing
+# 51 tests, all passing
 ```
 
 ## References

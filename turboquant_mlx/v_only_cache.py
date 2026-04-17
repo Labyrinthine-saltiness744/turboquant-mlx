@@ -82,10 +82,6 @@ class VOnlyTurboQuantCache:
         return self._k_cache.offset
 
     @property
-    def offset(self):
-        return self._k_cache.offset
-
-    @property
     def state(self):
         """Combined K (fp16) + V (packed) state for serialization."""
         k_state = list(self._k_cache.state) if self._k_cache.state else []

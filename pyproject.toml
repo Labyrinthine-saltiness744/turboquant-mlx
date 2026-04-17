@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "turboquant-mlx"
-version = "0.2.0"
+version = "0.3.0"
 description = "TurboQuant KV cache compression for MLX with fused Metal kernels"
 readme = "README.md"
 license = {text = "Apache-2.0"}

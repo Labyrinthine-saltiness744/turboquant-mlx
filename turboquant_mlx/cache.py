@@ -261,8 +261,17 @@ class TurboQuantKVCache:
     def state(self, v):
         if not v:
             return
-        self.k_packed, self.k_norms, self.v_packed, self.v_norms = v
-        self.offset = self.k_packed.shape[2]
+        if len(v) == 4:
+            self.k_packed, self.k_norms, self.v_packed, self.v_norms = v
+            self.offset = self.k_packed.shape[2]
+        elif len(v) == 2:
+            # v_only mode: only V packed + V norms
+            self.v_packed, self.v_norms = v
+            self.offset = self.v_packed.shape[2]
+        else:
+            raise ValueError(
+                f"Expected 2 (v_only) or 4 arrays in state, got {len(v)}"
+            )
 
     _DTYPE_MAP = {
         "float16": mx.float16,
